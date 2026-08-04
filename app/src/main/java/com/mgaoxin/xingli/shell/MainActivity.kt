@@ -49,21 +49,25 @@ enum class ShellTab(
     val titleRes: Int,
     val url: String,
     val icon: ImageVector,
+    val autoLogin: SiteCredential?,
 ) {
     CHAT(
         titleRes = R.string.tab_chat,
         url = "https://ai.mgaoxin.com/#/hermes/chat",
         icon = Icons.AutoMirrored.Filled.Chat,
+        autoLogin = AutoLogin.STUDIO,
     ),
     LIBRARY(
         titleRes = R.string.tab_library,
         url = "https://study.mgaoxin.com/files/",
         icon = Icons.Filled.Book,
+        autoLogin = AutoLogin.ALIST,
     ),
     SETTINGS(
         titleRes = R.string.tab_settings,
         url = "https://ai.mgaoxin.com/#/hermes/settings",
         icon = Icons.Filled.Settings,
+        autoLogin = AutoLogin.STUDIO,
     ),
 }
 
@@ -145,7 +149,7 @@ fun ShellScreen() {
                             createWebView(
                                 context = ctx,
                                 url = tab.url,
-                                autoLogin = tab == ShellTab.LIBRARY,
+                                autoLogin = tab.autoLogin,
                             ) { loading ->
                                 if (loading) loadingTab = tab else if (loadingTab == tab) loadingTab = null
                             }
@@ -178,7 +182,7 @@ fun ShellScreen() {
 private fun createWebView(
     context: Context,
     url: String,
-    autoLogin: Boolean = false,
+    autoLogin: SiteCredential?,
     onLoading: (Boolean) -> Unit,
 ): WebView {
     return WebView(context).apply {
@@ -200,10 +204,8 @@ private fun createWebView(
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 onLoading(false)
-                // 书房页(AList)壳内自动登录：页面加载完检查 token，未登录则注入后刷新
-                if (autoLogin) {
-                    view?.let(AlistAutoLogin::ensureLoggedIn)
-                }
+                // 壳内自动登录：页面加载完检查 token，未登录则注入 (Studio/alist 通用)
+                autoLogin?.let { cred -> view?.let { AutoLogin.ensureLoggedIn(it, cred) } }
             }
 
             override fun onReceivedError(
