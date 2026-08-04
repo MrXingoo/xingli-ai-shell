@@ -4,7 +4,9 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.Bundle
+import android.util.Log
 import android.view.View
+import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -45,29 +47,37 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
 
+private const val TAG = "XingliShell"
+
 enum class ShellTab(
     val titleRes: Int,
     val url: String,
     val icon: ImageVector,
+    /** 壳内自动登录凭据：null 表示不做自动登录 */
     val autoLogin: SiteCredential?,
+    /** Hermes Studio 是桌面优先设计，移动 UA 可能触发响应式布局 bug 导致白屏，用桌面 UA 加载 */
+    val useDesktopUA: Boolean,
 ) {
     CHAT(
         titleRes = R.string.tab_chat,
         url = "https://ai.mgaoxin.com/#/hermes/chat",
         icon = Icons.AutoMirrored.Filled.Chat,
         autoLogin = AutoLogin.STUDIO,
+        useDesktopUA = true,
     ),
     LIBRARY(
         titleRes = R.string.tab_library,
         url = "https://study.mgaoxin.com/files/",
         icon = Icons.Filled.Book,
         autoLogin = AutoLogin.ALIST,
+        useDesktopUA = false,
     ),
     SETTINGS(
         titleRes = R.string.tab_settings,
         url = "https://ai.mgaoxin.com/#/hermes/settings",
         icon = Icons.Filled.Settings,
         autoLogin = AutoLogin.STUDIO,
+        useDesktopUA = true,
     ),
 }
 
@@ -150,6 +160,7 @@ fun ShellScreen() {
                                 context = ctx,
                                 url = tab.url,
                                 autoLogin = tab.autoLogin,
+                                useDesktopUA = tab.useDesktopUA,
                             ) { loading ->
                                 if (loading) loadingTab = tab else if (loadingTab == tab) loadingTab = null
                             }
@@ -178,11 +189,44 @@ fun ShellScreen() {
     }
 }
 
+/** 注入 JS：捕获 window.onerror / unhandledrejection / console.error，红条浮层显示 → 白屏时可看到真实报错 */
+private const val JS_ERROR_CAPTURE = """
+(function () {
+  if (window.__xingliErrCaptured) return;
+  window.__xingliErrCaptured = true;
+  var bar = null;
+  function show(msg) {
+    try {
+      if (!bar) {
+        bar = document.createElement('div');
+        bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:999999;background:#c62828;color:#fff;font-size:12px;padding:6px 10px;white-space:pre-wrap;word-break:break-all;max-height:40%;overflow:auto;';
+        document.body.appendChild(bar);
+      }
+      var line = document.createElement('div');
+      line.textContent = msg;
+      bar.appendChild(line);
+    } catch (e) {}
+  }
+  window.addEventListener('error', function (e) {
+    show('JS错误: ' + (e.message || '') + ' @' + (e.filename || '') + ':' + (e.lineno || ''));
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) {
+    show('Promise错误: ' + (e.reason && e.reason.message ? e.reason.message : String(e.reason)));
+  });
+  var origErr = console.error;
+  console.error = function () {
+    try { show('console.error: ' + Array.prototype.slice.call(arguments).map(function(a){return typeof a==='string'?a:JSON.stringify(a);}).join(' ').substring(0, 500)); } catch (e) {}
+    origErr.apply(console, arguments);
+  };
+})();
+"""
+
 @SuppressLint("SetJavaScriptEnabled")
 private fun createWebView(
     context: Context,
     url: String,
     autoLogin: SiteCredential?,
+    useDesktopUA: Boolean = false,
     onLoading: (Boolean) -> Unit,
 ): WebView {
     return WebView(context).apply {
@@ -193,6 +237,9 @@ private fun createWebView(
             cacheMode = WebSettings.LOAD_DEFAULT
             mediaPlaybackRequiresUserGesture = false
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            if (useDesktopUA) {
+                userAgentString = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+            }
         }
         // 持久化登录态：Cookie + localStorage 均默认落盘（非 incognito）
         webViewClient = object : WebViewClient() {
@@ -204,7 +251,9 @@ private fun createWebView(
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 onLoading(false)
-                // 壳内自动登录：页面加载完检查 token，未登录则注入 (Studio/alist 通用)
+                // 注入 JS 错误捕获（白屏排查用）
+                view?.evaluateJavascript(JS_ERROR_CAPTURE, null)
+                // 壳内自动登录（Studio/AList 通用）：页面加载完检查 token，不一致则注入后刷新
                 autoLogin?.let { cred -> view?.let { AutoLogin.ensureLoggedIn(it, cred) } }
             }
 
@@ -214,9 +263,17 @@ private fun createWebView(
                 error: WebResourceError?,
             ) {
                 super.onReceivedError(view, request, error)
+                Log.e(TAG, "onReceivedError url=${request?.url} code=${error?.errorCode} desc=${error?.description}")
             }
         }
-        webChromeClient = WebChromeClient()
+        webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(message: ConsoleMessage?): Boolean {
+                if (message != null && message.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                    Log.e(TAG, "JS console.error: ${message.message()} @${message.sourceId()}:${message.lineNumber()}")
+                }
+                return super.onConsoleMessage(message)
+            }
+        }
         loadUrl(url)
     }
 }
