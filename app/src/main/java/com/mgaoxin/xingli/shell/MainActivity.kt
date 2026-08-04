@@ -142,7 +142,11 @@ fun ShellScreen() {
                 AndroidView(
                     factory = { ctx ->
                         webViews.getOrPut(tab) {
-                            createWebView(ctx, tab.url) { loading ->
+                            createWebView(
+                                context = ctx,
+                                url = tab.url,
+                                autoLogin = tab == ShellTab.LIBRARY,
+                            ) { loading ->
                                 if (loading) loadingTab = tab else if (loadingTab == tab) loadingTab = null
                             }
                         }
@@ -174,6 +178,7 @@ fun ShellScreen() {
 private fun createWebView(
     context: Context,
     url: String,
+    autoLogin: Boolean = false,
     onLoading: (Boolean) -> Unit,
 ): WebView {
     return WebView(context).apply {
@@ -195,6 +200,10 @@ private fun createWebView(
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 onLoading(false)
+                // 书房页(AList)壳内自动登录：页面加载完检查 token，未登录则注入后刷新
+                if (autoLogin) {
+                    view?.let(AlistAutoLogin::ensureLoggedIn)
+                }
             }
 
             override fun onReceivedError(
