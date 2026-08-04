@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">星黎AI</string>
+    <string name="tab_chat">会话</string>
+    <string name="tab_library">书房</string>
+    <string name="tab_settings">配置</string>
+</resources>
