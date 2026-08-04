@@ -7,7 +7,7 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 统一壳内自动登录：原生调两站登录接口拿 token → 注入 WebView 的 localStorage → reload。
@@ -55,8 +55,8 @@ object AutoLogin {
         password = PASSWORD,
     )
 
-    /** 防重入：页面 reload 会反复触发 onPageFinished */
-    private val injectBusy = AtomicBoolean(false)
+    /** 防重入（按站点隔离）：页面 reload 会反复触发 onPageFinished；三个 WebView 常驻，全局互斥会让后加载的站点被跳过 */
+    private val busySites = ConcurrentHashMap.newKeySet<String>()
 
     /**
      * 页面加载完成后调用：重新登录拿新 token，与 localStorage 现有 token 对比。
@@ -64,8 +64,8 @@ object AutoLogin {
      * - 不同/为空 → 覆盖注入新 token 并 reload
      */
     @SuppressLint("JavascriptInterface")
-    fun ensureLoggedIn(webView: WebView, cred: SiteCredential) {
-        if (!injectBusy.compareAndSet(false, true)) return
+    fun ensureLoggedIn(webView: WebView, cred: SiteCredential, onFailure: ((String) -> Unit)? = null) {
+        if (!busySites.add(cred.name)) return
         Thread {
             val freshToken = try {
                 requestToken(cred)
@@ -96,10 +96,12 @@ object AutoLogin {
                                 Log.i(TAG, "${cred.name}: token 已是最新，跳过")
                             }
                         }
+                    } else {
+                        // token 获取失败：提示用户手动登录兜底（不再静默）
+                        onFailure?.invoke("${cred.name} 自动登录失败（网络或服务器异常），请手动登录")
                     }
-                    // token 获取失败则静默：用户手动登录兜底
                 } finally {
-                    injectBusy.set(false)
+                    busySites.remove(cred.name)
                 }
             }
         }.start()

@@ -2,7 +2,9 @@ package com.mgaoxin.xingli.shell
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.view.View
@@ -18,13 +20,18 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Book
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -32,18 +39,25 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
 
@@ -98,10 +112,19 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ShellScreen() {
+    val context = LocalContext.current
     var currentTab by rememberSaveable { mutableStateOf(ShellTab.CHAT) }
     // 三个 WebView 实例常驻，切换 Tab 只改可见性不销毁 → 登录态/页面状态全保留
     val webViews = remember { mutableMapOf<ShellTab, WebView>() }
     var loadingTab by remember { mutableStateOf<ShellTab?>(null) }
+    // WebView 内核过旧检测（旧内核 → Studio 前端 JS 不执行 → 白屏）
+    var webViewTooOld by remember { mutableStateOf(false) }
+    // 兼容性/自动登录失败提示条
+    var notice by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        webViewTooOld = WebViewCompat.isTooOld(context)
+    }
 
     BackHandler {
         val wv = webViews[currentTab]
@@ -161,6 +184,8 @@ fun ShellScreen() {
                                 url = tab.url,
                                 autoLogin = tab.autoLogin,
                                 useDesktopUA = tab.useDesktopUA,
+                                detectBootFallback = tab.useDesktopUA,
+                                onNotice = { notice = it },
                             ) { loading ->
                                 if (loading) loadingTab = tab else if (loadingTab == tab) loadingTab = null
                             }
@@ -185,7 +210,61 @@ fun ShellScreen() {
                     modifier = Modifier.align(Alignment.TopCenter),
                 )
             }
+            notice?.let { msg ->
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .zIndex(5f),
+                    color = Color(0xFFFFF3CD),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    ) {
+                        Text(
+                            text = msg,
+                            color = Color(0xFF664D03),
+                            fontSize = 13.sp,
+                            modifier = Modifier.weight(1f),
+                        )
+                        IconButton(onClick = { notice = null }) {
+                            Icon(
+                                imageVector = Icons.Filled.Close,
+                                contentDescription = "关闭提示",
+                            )
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    if (webViewTooOld) {
+        AlertDialog(
+            onDismissRequest = { webViewTooOld = false },
+            title = { Text("WebView 内核过旧") },
+            text = {
+                Text(
+                    "检测到当前「Android System WebView」版本过低（低于 Chrome 90），" +
+                        "会话/配置页可能无法正常显示（白屏）。建议更新后重新打开 APP。",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        webViewTooOld = false
+                        openWebViewStore(context)
+                    },
+                ) {
+                    Text("去更新")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { webViewTooOld = false }) {
+                    Text("继续使用")
+                }
+            },
+        )
     }
 }
 
@@ -227,6 +306,8 @@ private fun createWebView(
     url: String,
     autoLogin: SiteCredential?,
     useDesktopUA: Boolean = false,
+    detectBootFallback: Boolean = false,
+    onNotice: (String) -> Unit,
     onLoading: (Boolean) -> Unit,
 ): WebView {
     return WebView(context).apply {
@@ -254,7 +335,29 @@ private fun createWebView(
                 // 注入 JS 错误捕获（白屏排查用）
                 view?.evaluateJavascript(JS_ERROR_CAPTURE, null)
                 // 壳内自动登录（Studio/AList 通用）：页面加载完检查 token，不一致则注入后刷新
-                autoLogin?.let { cred -> view?.let { AutoLogin.ensureLoggedIn(it, cred) } }
+                autoLogin?.let { cred ->
+                    view?.let {
+                        AutoLogin.ensureLoggedIn(
+                            it, cred,
+                            onFailure = { msg ->
+                                Log.w(TAG, msg)
+                                onNotice(msg)
+                            },
+                        )
+                    }
+                }
+                // boot-fallback 残留检测（SPA 未挂载 = JS 没执行 = WebView 内核过旧）。
+                // 延迟 1.5s 等动态 import 完成，避免误报。
+                if (detectBootFallback) {
+                    view?.postDelayed({
+                        view.evaluateJavascript(JS_CHECK_BOOT_FALLBACK) { r ->
+                            if (r == "true") {
+                                Log.w(TAG, "boot-fallback 残留：SPA 未挂载，WebView 内核可能过旧")
+                                onNotice("页面未正常加载：WebView 内核可能过旧，请在系统设置中更新「Android System WebView」后重试")
+                            }
+                        }
+                    }, 1500)
+                }
             }
 
             override fun onReceivedError(
@@ -275,5 +378,35 @@ private fun createWebView(
             }
         }
         loadUrl(url)
+    }
+}
+
+/** 检测 Studio 前端 SPA 是否挂载：boot-fallback 残留或 #app 为空 = JS 未执行（旧内核白屏） */
+private const val JS_CHECK_BOOT_FALLBACK = """
+(function () {
+  var app = document.getElementById('app');
+  if (!app) return false;
+  if (app.children.length === 0) return true;
+  var fb = app.querySelector('.boot-fallback');
+  return !!(fb && app.children.length <= 1);
+})()
+"""
+
+/** 引导去应用商店更新 Android System WebView */
+private fun openWebViewStore(context: Context) {
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=com.google.android.webview"))
+    try {
+        context.startActivity(intent)
+    } catch (_: Exception) {
+        try {
+            context.startActivity(
+                Intent(
+                    Intent.ACTION_VIEW,
+                    Uri.parse("https://play.google.com/store/apps/details?id=com.google.android.webview"),
+                ),
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "打开应用商店失败", e)
+        }
     }
 }
