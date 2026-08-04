@@ -62,9 +62,17 @@ object AutoLogin {
      * 页面加载完成后调用：重新登录拿新 token，与 localStorage 现有 token 对比。
      * - 相同 → 已是有效 token，跳过（防死循环）
      * - 不同/为空 → 覆盖注入新 token 并 reload
+     *
+     * @param forceReload true 时即使 token 相同也强制 reload（登录页自愈用：
+     *                    前端可能因内存态丢失停在登录页，重载后重新初始化即恢复）
      */
     @SuppressLint("JavascriptInterface")
-    fun ensureLoggedIn(webView: WebView, cred: SiteCredential, onFailure: ((String) -> Unit)? = null) {
+    fun ensureLoggedIn(
+        webView: WebView,
+        cred: SiteCredential,
+        forceReload: Boolean = false,
+        onFailure: ((String) -> Unit)? = null,
+    ) {
         if (!busySites.add(cred.name)) return
         Thread {
             val freshToken = try {
@@ -92,6 +100,9 @@ object AutoLogin {
                                 ) { _ ->
                                     webView.reload()
                                 }
+                            } else if (forceReload) {
+                                Log.i(TAG, "${cred.name}: token 已最新但页面停在登录页，强制刷新恢复")
+                                webView.reload()
                             } else {
                                 Log.i(TAG, "${cred.name}: token 已是最新，跳过")
                             }
